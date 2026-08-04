@@ -1,0 +1,175 @@
+#
+#SCRIPT FOR MICROARRAY DATA, GSE73622
+#
+#STEP 1 DOWNLOAD AND LOAD PACKAGES
+library(GEOquery)
+library(limma)
+
+#STEP 2: DOWNLOAD DATA, SEPERATE INTO PHENO, FETAUTRE, AND EXPRS AND SAVE EACH
+gse <- getGEO("GSE73622", GSEMatrix = TRUE, AnnotGPL = TRUE)
+gse_data <- gse[[1]]
+exprs_data <- exprs(gse_data)
+pheno_data <- pData(gse_data)
+feature_data <- fData(gse_data)
+
+write.csv(exprs_data, "~/HYRS_bioinfo/GSE73622/GSE73622_expression_matrix.csv")
+write.csv(pheno_data, "~/HYRS_bioinfo/GSE73622/GSE73622_sample_metadata.csv")
+write.csv(feature_data, "~/HYRS_bioinfo/GSE73622/GSE73622_probe_annotation.csv")
+
+#STEP 3: REMOVE LOW VARIANCE PROBES AND FILL NAN WITH MEDIAN
+exprs_data <- exprs_data[complete.cases(exprs_data), ]
+exprs_data <- exprs_data[apply(exprs_data, 1, var) > 0.01, ]# change threshold as needed
+
+#finding column NaN
+sum(is.nan(exprs_data))
+rownames(exprs_data)
+colSums(is.na(exprs_data))
+dim(exprs_data)
+head(exprs_data)
+# fill column NaN with median 
+exprs_data[is.nan(exprs_data)] <- NA
+
+exprs_data <- apply(exprs_data, 2, function(x) {
+  x[is.na(x)] <- median(x, na.rm = TRUE)
+  x
+})
+feature_data <- feature_data[rownames(exprs_data), ]
+head(rownames(feature_data))
+head(rownames(exprs_data))
+
+
+#STEP 4: ANNOTATE WITH GENE SYMBOL
+feature_data <- fData(gse_data)
+colnames(feature_data)
+head(feature_data$`Gene symbol`)  # Confirm it has gene symbols
+
+# Combine expression data and annotation
+exprs_annotated <- data.frame(probe_id = rownames(exprs_data),
+                              exprs_data,
+                              stringsAsFactors = FALSE)
+
+# Add gene symbols and save
+exprs_annotated$gene_symbol <- feature_data[rownames(exprs_data), "Gene symbol"]
+exprs_annotated$gene_symbol <- sapply(strsplit(exprs_annotated$gene_symbol, "///", fixed = TRUE), `[`, 1)
+
+write.csv(exprs_annotated, "~/HYRS_bioinfo/GSE73622/GSE73622_Exprs_annotated.csv")
+colnames(exprs_annotated)#make sure gene symbol is there
+dim(exprs_annotated)#column should have more (+2) cause probe id and gene symbol are added
+exprs_matrix <- exprs_annotated
+
+#STEP 5: MAKE GROUPS AND DESIGN AND CONTRRST MATRICES
+table(pheno_data$`disease:ch1`)
+group <- factor(pheno_data$`disease:ch1`)#saying gorup in endo and no endo
+colnames(exprs_matrix)
+rownames(pheno_data)
+pheno_data <- pheno_data[colnames(exprs_matrix), ]
+
+design <- model.matrix(~0 + group)#design matrix
+colnames(design) <- make.names(colnames(design))
+contrast.matrix <- makeContrasts(
+  Endometriosis_vs_Control = groupEndometriosis - groupNo.Endometriosis,
+  levels = design
+)#contrast matrix
+
+#STEP 6: FIT DATA, THIS IS ACTUAL ANALYSIS
+fit <- lmFit(exprs_data, design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+
+#veiw results
+results <- topTable(fit2, adjust = "fdr", number = Inf)
+dim(results)
+
+
+#step 7:annotate results with gene symbol
+results$probe_id <- rownames(results)
+results_annotated <- merge(
+  results,
+  exprs_annotated[, c("probe_id", "gene_symbol")],
+  by = "probe_id", all.x = TRUE
+)
+
+#STEP 8: MAKE THRESHOLDS AN CLASIIFY GENES SIGNIFICANCE *very important
+logFC_threshold <- 0.1
+adjP_threshold  <- 0.05
+
+results_annotated$Regulation <- ifelse(
+  results_annotated$adj.P.Val < adjP_threshold & results_annotated$logFC >  logFC_threshold, "Upregulated",
+  ifelse(results_annotated$adj.P.Val < adjP_threshold & results_annotated$logFC < -logFC_threshold, "Downregulated",
+         "Not Significant"))
+
+#view significance results
+print(table(results_annotated$Regulation))
+colnames(results_annotated)
+#
+# STEP 9 :make volcano plot
+#
+
+#give colours for plot
+keyvals <- ifelse(
+  results_annotated$Regulation == "Upregulated",   "red2",
+  ifelse(results_annotated$Regulation == "Downregulated", "royalblue", "grey30"))
+keyvals[is.na(keyvals)] <- "grey30"
+names(keyvals)[keyvals == "red2"]      <- "Upregulated"
+names(keyvals)[keyvals == "royalblue"] <- "Downregulated"
+names(keyvals)[keyvals == "grey30"]    <- "Not significant"
+
+#make volcano plot
+library(EnhancedVolcano)
+library(ggplot2)
+
+ EnhancedVolcano(
+  results_annotated,
+  lab       = results_annotated$gene_symbol,
+  x         = "logFC",
+  y         = "adj.P.Val",
+  pCutoff   = adjP_threshold,
+  FCcutoff  = logFC_threshold,
+  colCustom = keyvals,        
+  colAlpha  = 0.8,
+  pointSize = 2.5,
+  labSize   = 3.5,
+  drawConnectors = TRUE,
+  title    = "hi",
+  subtitle = "Upregulated (red), Downregulated (blue), Not significant (grey)",
+  ylab     = bquote(~-Log[10]~ "adj." ~italic(P)),
+)
+ ggsave("~/HYRS_bioinfo/GSE73622/volcano_plot_622.png",
+        plot = volcano_plot, width = 10, height = 8, dpi = 300)
+#
+#STEP 10: make heatmap
+#
+library(pheatmap)
+ 
+ #this is all for data for heatmap
+significant_genes <- results_annotated[results_annotated$Regulation != "Not Significant", ]
+top_DEGs <- significant_genes[order(significant_genes$adj.P.Val), ]
+top_DEGs <- top_DEGs[!duplicated(top_DEGs$gene_symbol), ]
+top_DEGs <- top_DEGs[!is.na(top_DEGs$gene_symbol) & top_DEGs$gene_symbol != "", ]
+top50_genes <- head(top_DEGs, 50)
+heatmap_data <- exprs_matrix[top50_genes$probe_id, ]
+heatmap_data <- heatmap_data[, grep("^GSM", colnames(heatmap_data))]
+str(heatmap_data)
+rownames(heatmap_data) <- top50_genes$gene_symbol
+heatmap_scaled <- t(scale(t(heatmap_data)))
+annotation_col <- data.frame(Condition = group)
+rownames(annotation_col) <- colnames(heatmap_scaled)
+
+#actual hetamap
+pheatmap(
+  heatmap_scaled,
+  annotation_col = annotation_col,
+  fontsize_row = 8,
+  fontsize_col = 7,
+  main = "",
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  border_color = NA,
+  filename = "~/HYRS_bioinfo/GSE73622/622_heatmap.png",
+  plot = heatmap,
+  width = 10,
+  height = 8,
+ dpi = 300
+)
+
+#yay now do downstream
