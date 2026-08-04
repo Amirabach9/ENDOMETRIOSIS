@@ -1,0 +1,320 @@
+#SCRIPT FOR RNA SEQ DATA, GSE105764
+
+
+# =============================================================================
+#  STEP 1 — INSTALL PACKAGES
+# =============================================================================
+
+install.packages("BiocManager")
+
+BiocManager::install("GEOquery")
+
+BiocManager::install("DESeq2")
+
+BiocManager::install("pheatmap")
+
+BiocManager::install("EnhancedVolcano")
+
+BiocManager::install("enrichplot")
+
+BiocManager::install("clusterProfiler")
+
+BiocManager::install("org.Hs.eg.db") 
+
+BiocManager::install("AnnotationDbi")
+
+# =============================================================================
+#  STEP 2 — LOAD THE PACKAGES
+# =============================================================================
+library(BiocManager)
+
+library(AnnotationDbi)
+
+library(GEOquery)
+
+library(DESeq2)
+
+library(enrichplot)
+
+library(EnhancedVolcano)
+
+library(clusterProfiler)
+
+library(org.Hs.eg.db)                         
+
+set.seed(99) #set seed so its the same everytime you run
+# =============================================================================
+#  STEP 3 — DOWNLOAD YOUR DATASET FROM GEO
+# =============================================================================
+
+my_gse <- "GSE105764"   
+
+my_gse                                        
+
+getGEOSuppFiles(my_gse)                       
+
+list.files(my_gse)                            
+# Read the filenames that just printed.choose the count marix
+
+my_file <- file.path(my_gse, "GSE105764_count.txt.gz")   
+
+file.exists(my_file)# check if you wrote correct name = TRUE
+
+
+# =============================================================================
+#  STEP 4 — READ THE COUNT TABLE INTO R
+# =============================================================================
+
+counts <- read.delim(gzfile(my_file), row.names = 1, check.names = FALSE)
+
+dim(counts) #row(first number)= genes, column = samples
+
+counts[1:5, 1:5]    
+#check if data isnt already normalized. want whole numbers
+
+colnames(counts)
+
+counts <- counts[, sapply(counts, is.numeric)]
+
+counts <- as.matrix(counts)
+
+counts <- round(counts)
+
+ncol(counts)                                   
+
+
+# =============================================================================
+#  STEP 5 — SAY WHICH SAMPLE IS WHICH
+# =============================================================================
+
+colnames(counts)  
+#copy order of colnames ex ectopic - disease, eutopic = control
+
+my_groups <- c("disease", "disease", "disease", "disease", "disease", "disease", "disease", "disease",
+               "control", "control", "control", "control", "control", "control", "control", "control")  
+
+length(my_groups)#should equal to colnames of counts
+
+ncol(counts)#want the same number as line above                                   
+
+my_groups <- factor(my_groups, levels = c("control", "disease"))
+
+table(my_groups)#check if that makes sense
+
+sample_info <- data.frame(condition = my_groups)
+
+rownames(sample_info) <- colnames(counts)
+
+sample_info#check if this makes sense
+
+# =============================================================================
+#  STEP 6 — BUILD THE DESeq2 OBJECT
+# =============================================================================
+
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData   = sample_info,
+                              design    = ~ condition)
+#3 things needed to build object^
+
+dds#preveiw object
+
+nrow(dds)#genes before filtering
+
+#get rid of rows (genes) with noise and low variance 
+keep <- rowSums(counts(dds) >= 10) >= 2
+
+dds <- dds[keep, ]
+
+nrow(dds)#genes after filtering
+
+#give refrence or it will make one thats alphabetic first the reference
+dds$condition <- relevel(dds$condition, ref = "control")
+
+
+# =============================================================================
+#  STEP 7 — QUALITY CHECK BEFORE YOU TRUST ANYTHING. MAKE PCA PLOT TO CHECK
+# =============================================================================
+
+vsd <- vst(dds, blind = TRUE)
+
+plotPCA(vsd, intgroup = "condition")
+png(
+  "~/HYRS_bioinfo/Endometriosis_data/764_PC1plot.png",
+  width = 3000,
+  height = 2400,
+  res = 300
+)
+#you want very seperate clusters
+# =============================================================================
+#  STEP 8 — RUN THE ACTUAL TEST
+# =============================================================================
+
+dds <- DESeq(dds)#this line is the analysis, this might run a lil bit
+
+res <- results(dds, contrast = c("condition", "disease", "control"))
+
+colnames(res)#look
+
+res <- res[order(res$padj), ]   
+
+res$probe_id <- rownames(res)# sort best-first
+
+head(res, 20) ### LOOK ### your top 20 genes
+
+
+library(org.Hs.eg.db)#run again so it doesnt forget
+library(AnnotationDbi)
+
+#mapping gene names to gene ID
+res$gene_name <- mapIds(
+  org.Hs.eg.db,
+  keys = res$probe_id,
+  column = "SYMBOL",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+)
+
+#have same thresholds for both analysis if you use multiple data sets
+log2FoldChange_threshold <- 0.1#make sure same colnames as in results data
+padj_threshold  <- 0.05
+
+res$Significant <- ifelse(
+  res$padj < 0.05 & res$log2FoldChange > 0.1,
+  "Upregulated",
+  "Downregulated")
+summary(res)
+
+# =============================================================================
+#  STEP 9 — PULL OUT THE SIGNIFICANT GENES
+# =============================================================================
+
+#make top 50 data for visuals
+top50 <- res[order(res$padj), ][1:50, ]
+
+top50$Significant <- ifelse(
+  top50$padj < 0.05 & top50$log2FoldChange > 0.1,
+  "Upregulated",
+  "Downregulated")
+
+colnames(top50)
+
+#save top 50 table to review results
+top50_table <- top50[, c(
+  "gene_name",
+  "log2FoldChange",
+  "padj",
+  "Significant"
+)]
+summary(top50)
+write.csv(as.data.frame(top50_table),
+  "~/HYRS_bioinfo/Endometriosis_data/top50_table_764.csv",
+  row.names = FALSE
+)
+write.csv(as.data.frame(res), "~/HYRS_bioinfo/Endometriosis_data/764res.csv")
+list.files("764results")                      
+
+head(rownames(res))
+# =============================================================================
+#  STEP 10 — VOLCANO PLOT
+#==============================================================================
+
+#only wanted to label top 20 genes
+res$score <- -log10(res$padj) * abs(res$log2FoldChange)
+top20 <- res[order(-res$score), ][1:20, ]
+
+top20$Significant <- ifelse(
+  top20$padj < 0.05 & top20$log2FoldChange > 0.1,
+  "Upregulated",
+  "Downregulated")
+top20_table <- top20[, c(
+  "gene_name",
+  "log2FoldChange",
+  "padj",
+  "Significant"
+)]
+write.csv(as.data.frame(top20_table),
+          "~/HYRS_bioinfo/Endometriosis_data/top2050_table_764.csv",
+          row.names = FALSE
+)
+
+colnames(top20)
+
+res$Significant <- "Not Significant"
+
+res$Significant[
+  rownames(res) %in% rownames(top20) &
+    res$log2FoldChange > 0
+] <- "Upregulated"
+
+res$Significant[
+  rownames(res) %in% rownames(top20) &
+    res$log2FoldChange < 0
+] <- "Downregulated"
+
+
+#set colours for volcano
+keyvals <- ifelse(
+  res$Significant == "Upregulated",   "red2",
+  ifelse(res$Significant == "Downregulated", "royalblue", "grey30"))
+keyvals[is.na(keyvals)] <- "grey30"
+names(keyvals)[keyvals == "red2"]      <- "Upregulated"
+names(keyvals)[keyvals == "royalblue"] <- "Downregulated"
+names(keyvals)[keyvals == "grey30"]    <- "Not significant"
+
+names(keyvals) <- res$Significant
+labels <- ifelse(
+  rownames(res) %in% rownames(top20),
+  res$gene_name,
+  ""
+)
+
+#ACTUAL VOLCANO CODE
+library(EnhancedVolcano)
+library(ggplot2)
+volcano <- EnhancedVolcano(res,
+                lab      = labels,
+                x        = "log2FoldChange",
+                y        = "padj",
+                pCutoff  = 0.05,
+                FCcutoff = 1,
+                colCustom = keyvals,
+                title    = "Endometriosis vs control",
+                drawConnectors = TRUE,
+                max.overlaps = Inf,
+                boxedLabels = FALSE)### LOOK ### Plots panel
+print(volcano)
+ggsave(
+  filename = "~/HYRS_bioinfo/Endometriosis_data/vol764_20.png",
+  plot = volcano,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+# =============================================================================
+#  STEP 11 — HEATMAP OF TOP GENES
+# =============================================================================
+
+library(pheatmap)
+
+mat <- assay(vsd)[rownames(top20), ]
+
+rownames(mat) <- top20$gene_name
+
+mat <- mat - rowMeans(mat)                  
+
+pheatmap(
+  mat,
+  annotation_col = sample_info,
+  fontsize_row = 8,
+  show_rownames = TRUE,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  filename = "~/HYRS_bioinfo/Endometriosis_data/764_hm.png",
+  plot = heatmap,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+                                          
+#Yay now do downstream
