@@ -130,7 +130,7 @@ library(ggplot2)
   pointSize = 2.5,
   labSize   = 3.5,
   drawConnectors = TRUE,
-  title    = "hi",
+  title    = "Endometriosis vs control Volcano Plot",
   subtitle = "Upregulated (red), Downregulated (blue), Not significant (grey)",
   ylab     = bquote(~-Log[10]~ "adj." ~italic(P)),
 )
